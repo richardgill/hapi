@@ -9,6 +9,7 @@ import type {
     GitCommandResponse,
     MachinePathsExistsResponse,
     MachinesResponse,
+    TmuxSessionsResponse,
     MessagesResponse,
     PermissionMode,
     PushSubscriptionPayload,
@@ -370,6 +371,12 @@ export class ApiClient {
         return await this.request<MachinesResponse>('/api/machines')
     }
 
+    async getTmuxSessions(machineId: string): Promise<TmuxSessionsResponse> {
+        return await this.request<TmuxSessionsResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/tmux-sessions`
+        )
+    }
+
     async checkMachinePathsExists(
         machineId: string,
         paths: string[]
@@ -380,6 +387,13 @@ export class ApiClient {
                 method: 'POST',
                 body: JSON.stringify({ paths })
             }
+        )
+    }
+
+    async openInTmux(machineId: string, directory: string): Promise<{ ok: boolean; error?: string }> {
+        return await this.request<{ ok: boolean; error?: string }>(
+            `/api/machines/${encodeURIComponent(machineId)}/open-in-tmux`,
+            { method: 'POST', body: JSON.stringify({ directory }) }
         )
     }
 

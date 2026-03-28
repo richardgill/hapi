@@ -33,11 +33,14 @@ export function NewSession(props: {
     isLoading?: boolean
     onSuccess: (sessionId: string) => void
     onCancel: () => void
+    onOpenInTmux?: (machineId: string, directory: string) => Promise<{ ok: boolean; error?: string }>
 }) {
     const { haptic } = usePlatform()
     const { t } = useTranslation()
-    const { spawnSession, isPending, error: spawnError } = useSpawnSession(props.api)
+    const { spawnSession, isPending: isSpawnPending, error: spawnError } = useSpawnSession(props.api)
     const { sessions } = useSessions(props.api)
+    const [isTmuxPending, setIsTmuxPending] = useState(false)
+    const isPending = isSpawnPending || isTmuxPending
     const isFormDisabled = Boolean(isPending || props.isLoading)
     const { getRecentPaths, addRecentPath, getLastUsedMachineId, setLastUsedMachineId } = useRecentPaths()
 
@@ -229,6 +232,29 @@ export function NewSession(props: {
 
     async function handleCreate() {
         if (!machineId || !trimmedDirectory) return
+
+        if (props.onOpenInTmux) {
+            setError(null)
+            setIsTmuxPending(true)
+            try {
+                const result = await props.onOpenInTmux(machineId, trimmedDirectory)
+                if (result.ok) {
+                    haptic.notification('success')
+                    setLastUsedMachineId(machineId)
+                    addRecentPath(machineId, trimmedDirectory)
+                    props.onCancel()
+                    return
+                }
+                haptic.notification('error')
+                setError(result.error ?? 'Failed to open in tmux')
+            } catch (e) {
+                haptic.notification('error')
+                setError(e instanceof Error ? e.message : 'Failed to open in tmux')
+            } finally {
+                setIsTmuxPending(false)
+            }
+            return
+        }
 
         setError(null)
         try {

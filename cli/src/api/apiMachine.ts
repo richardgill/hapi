@@ -3,7 +3,10 @@
  */
 
 import { io, type Socket } from 'socket.io-client'
+import path from 'node:path'
 import { stat } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { logger } from '@/ui/logger'
 import { configuration } from '@/configuration'
 import type { Update, UpdateMachineBody } from '@hapi/protocol'
@@ -56,6 +59,81 @@ type MachineRpcHandlers = {
     requestShutdown: () => void
 }
 
+const execFileAsync = promisify(execFile)
+
+const findTmuxSessionForDirectory = async (directory: string): Promise<string | null> => {
+    try {
+        const { stdout } = await execFileAsync('tmux', [
+            'list-panes', '-a', '-F', '#{session_name}\t#{pane_current_path}'
+        ])
+        const sessionName = stdout
+            .split('\n')
+            .find(line => {
+                const panePath = line.split('\t')[1]
+                return panePath === directory || panePath?.startsWith(`${directory}/`)
+            })
+            ?.split('\t')[0]
+        return sessionName ?? null
+    } catch {
+        return null
+    }
+}
+
+type TmuxSessionInfo = {
+    name: string
+    path: string
+    windows: number
+    attached: boolean
+    lastAttached: number
+    panePaths: string[]
+}
+
+type ListTmuxSessionsResponse = {
+    sessions: TmuxSessionInfo[]
+}
+
+const listTmuxSessions = async (): Promise<ListTmuxSessionsResponse> => {
+    try {
+        const { stdout: sessionsOutput } = await execFileAsync('tmux', [
+            'list-sessions', '-F',
+            '#{session_name}\t#{session_path}\t#{session_windows}\t#{session_attached}\t#{session_last_attached}'
+        ])
+
+        const { stdout: panesOutput } = await execFileAsync('tmux', [
+            'list-panes', '-a', '-F', '#{session_name}\t#{pane_current_path}'
+        ])
+
+        const panePaths = new Map<string, Set<string>>()
+        for (const line of panesOutput.split('\n')) {
+            if (!line) continue
+            const [name, panePath] = line.split('\t')
+            if (!name || !panePath) continue
+            if (!panePaths.has(name)) panePaths.set(name, new Set())
+            panePaths.get(name)!.add(panePath)
+        }
+
+        const sessions: TmuxSessionInfo[] = sessionsOutput
+            .split('\n')
+            .filter(Boolean)
+            .map(line => {
+                const [name, sessionPath, windows, attached, lastAttached] = line.split('\t')
+                return {
+                    name: name ?? '',
+                    path: sessionPath ?? '',
+                    windows: parseInt(windows ?? '0', 10),
+                    attached: attached === '1',
+                    lastAttached: parseInt(lastAttached ?? '', 10) || 0,
+                    panePaths: Array.from(panePaths.get(name ?? '') ?? [])
+                }
+            })
+            .sort((a, b) => b.lastAttached - a.lastAttached)
+
+        return { sessions }
+    } catch {
+        return { sessions: [] }
+    }
+}
+
 interface PathExistsRequest {
     paths: string[]
 }
@@ -80,6 +158,8 @@ export class ApiMachineClient {
 
         registerCommonHandlers(this.rpcHandlerManager, getInvokedCwd())
 
+        this.rpcHandlerManager.registerHandler('list-tmux-sessions', listTmuxSessions)
+
         this.rpcHandlerManager.registerHandler<PathExistsRequest, PathExistsResponse>('path-exists', async (params) => {
             const rawPaths = Array.isArray(params?.paths) ? params.paths : []
             const uniquePaths = Array.from(new Set(rawPaths.filter((path): path is string => typeof path === 'string')))
@@ -98,6 +178,44 @@ export class ApiMachineClient {
 
             return { exists }
         })
+
+        this.rpcHandlerManager.registerHandler<{ directory: string }, { ok: boolean; error?: string }>(
+            'open-in-tmux',
+            async (params) => {
+                const directory = params?.directory?.trim()
+                if (!directory) throw new Error('directory is required')
+
+                const sessionName = await findTmuxSessionForDirectory(directory)
+                if (!sessionName) {
+                    const baseName = path.basename(directory)
+                    const parentDir = path.dirname(directory)
+                    const hasSiblingMain = await stat(path.join(parentDir, 'main'))
+                        .then(s => s.isDirectory(), () => false)
+                    const newSessionName = hasSiblingMain
+                        ? `${path.basename(parentDir)}/${baseName}`
+                        : baseName
+
+                    try {
+                        await execFileAsync('tmux', [
+                            'new-session', '-d', '-s', newSessionName, '-c', directory,
+                            `${process.env.HOME}/Scripts/worktree-open`
+                        ])
+                    } catch (err) {
+                        return { ok: false, error: err instanceof Error ? err.message : String(err) }
+                    }
+
+                    return { ok: true }
+                }
+
+                await execFileAsync('tmux', [
+                    'new-window', '-t', sessionName,
+                    '-c', directory,
+                    `${process.env.HOME}/Scripts/cl`
+                ])
+
+                return { ok: true }
+            }
+        )
     }
 
     setRPCHandlers({ spawnSession, stopSession, requestShutdown }: MachineRpcHandlers): void {

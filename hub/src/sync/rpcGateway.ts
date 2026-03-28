@@ -156,6 +156,22 @@ export class RpcGateway {
         }
     }
 
+    async listTmuxSessions(machineId: string): Promise<{ sessions: Array<{ name: string; path: string; windows: number; attached: boolean; lastAttached: number; panePaths: string[] }> }> {
+        const result = await this.machineRpc(machineId, 'list-tmux-sessions', {})
+        if (!result || typeof result !== 'object') {
+            throw new Error('Unexpected list-tmux-sessions result')
+        }
+        return result as { sessions: Array<{ name: string; path: string; windows: number; attached: boolean; lastAttached: number; panePaths: string[] }> }
+    }
+
+    async openInTmux(machineId: string, directory: string): Promise<{ ok: boolean; error?: string }> {
+        const result = await this.machineRpc(machineId, 'open-in-tmux', { directory })
+        if (!result || typeof result !== 'object') {
+            throw new Error('Unexpected open-in-tmux result')
+        }
+        return result as { ok: boolean; error?: string }
+    }
+
     async checkPathsExist(machineId: string, paths: string[]): Promise<Record<string, boolean>> {
         const result = await this.machineRpc(machineId, 'path-exists', { paths }) as RpcPathExistsResponse | unknown
         if (!result || typeof result !== 'object') {

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import type { SessionSummary } from '@/types/api'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { SessionSummary, TmuxSession } from '@/types/api'
 import type { ApiClient } from '@/api/client'
 import { useLongPress } from '@/hooks/useLongPress'
 import { usePlatform } from '@/hooks/usePlatform'
@@ -9,58 +9,7 @@ import { RenameSessionDialog } from '@/components/RenameSessionDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { getSessionModelLabel } from '@/lib/sessionModelLabel'
 import { useTranslation } from '@/lib/use-translation'
-
-type SessionGroup = {
-    directory: string
-    displayName: string
-    sessions: SessionSummary[]
-    latestUpdatedAt: number
-    hasActiveSession: boolean
-}
-
-function getGroupDisplayName(directory: string): string {
-    if (directory === 'Other') return directory
-    const parts = directory.split(/[\\/]+/).filter(Boolean)
-    if (parts.length === 0) return directory
-    if (parts.length === 1) return parts[0]
-    return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`
-}
-
-function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGroup[] {
-    const groups = new Map<string, SessionSummary[]>()
-
-    sessions.forEach(session => {
-        const path = session.metadata?.worktree?.basePath ?? session.metadata?.path ?? 'Other'
-        if (!groups.has(path)) {
-            groups.set(path, [])
-        }
-        groups.get(path)!.push(session)
-    })
-
-    return Array.from(groups.entries())
-        .map(([directory, groupSessions]) => {
-            const sortedSessions = [...groupSessions].sort((a, b) => {
-                const rankA = a.active ? (a.pendingRequestsCount > 0 ? 0 : 1) : 2
-                const rankB = b.active ? (b.pendingRequestsCount > 0 ? 0 : 1) : 2
-                if (rankA !== rankB) return rankA - rankB
-                return b.updatedAt - a.updatedAt
-            })
-            const latestUpdatedAt = groupSessions.reduce(
-                (max, s) => (s.updatedAt > max ? s.updatedAt : max),
-                -Infinity
-            )
-            const hasActiveSession = groupSessions.some(s => s.active)
-            const displayName = getGroupDisplayName(directory)
-
-            return { directory, displayName, sessions: sortedSessions, latestUpdatedAt, hasActiveSession }
-        })
-        .sort((a, b) => {
-            if (a.hasActiveSession !== b.hasActiveSession) {
-                return a.hasActiveSession ? -1 : 1
-            }
-            return b.latestUpdatedAt - a.latestUpdatedAt
-        })
-}
+import { groupSessions, type SessionGroup } from '@/lib/sessionGrouping'
 
 function PlusIcon(props: { className?: string }) {
     return (
@@ -264,9 +213,6 @@ function SessionItem(props: {
                     {modelLabel ? (
                         <span>{t(modelLabel.key)}: {modelLabel.value}</span>
                     ) : null}
-                    {s.metadata?.worktree?.branch ? (
-                        <span>{t('session.item.worktree')}: {s.metadata.worktree.branch}</span>
-                    ) : null}
                 </div>
             </button>
 
@@ -317,6 +263,8 @@ function SessionItem(props: {
 
 export function SessionList(props: {
     sessions: SessionSummary[]
+    tmuxSessions?: TmuxSession[]
+    machineId?: string | null
     onSelect: (sessionId: string) => void
     onNewSession: () => void
     onRefresh: () => void
@@ -326,24 +274,39 @@ export function SessionList(props: {
     selectedSessionId?: string | null
 }) {
     const { t } = useTranslation()
-    const { renderHeader = true, api, selectedSessionId } = props
+    const { renderHeader = true, api, selectedSessionId, tmuxSessions, machineId } = props
     const groups = useMemo(
-        () => groupSessionsByDirectory(props.sessions),
-        [props.sessions]
+        () => groupSessions(props.sessions, tmuxSessions, machineId ?? null),
+        [props.sessions, tmuxSessions, machineId]
     )
+
     const [collapseOverrides, setCollapseOverrides] = useState<Map<string, boolean>>(
         () => new Map()
     )
+    const [pendingAutoSelect, setPendingAutoSelect] = useState<string | null>(null)
+    const knownSessionIdsRef = useRef<Set<string>>(new Set())
+
+    useEffect(() => {
+        if (!pendingAutoSelect) return
+        const group = groups.find(g => g.directory === pendingAutoSelect)
+        if (!group) return
+        const newSession = group.sessions.find(s => !knownSessionIdsRef.current.has(s.id))
+        if (newSession) {
+            props.onSelect(newSession.id)
+            setPendingAutoSelect(null)
+        }
+    }, [pendingAutoSelect, groups, props.onSelect])
+
     const isGroupCollapsed = (group: SessionGroup): boolean => {
-        const override = collapseOverrides.get(group.directory)
+        const override = collapseOverrides.get(group.key)
         if (override !== undefined) return override
-        return !group.hasActiveSession
+        return !group.hasActiveSession && group.sessions.length === 0
     }
 
-    const toggleGroup = (directory: string, isCollapsed: boolean) => {
+    const toggleGroup = (key: string, isCollapsed: boolean) => {
         setCollapseOverrides(prev => {
             const next = new Map(prev)
-            next.set(directory, !isCollapsed)
+            next.set(key, !isCollapsed)
             return next
         })
     }
@@ -352,11 +315,11 @@ export function SessionList(props: {
         setCollapseOverrides(prev => {
             if (prev.size === 0) return prev
             const next = new Map(prev)
-            const knownGroups = new Set(groups.map(group => group.directory))
+            const knownKeys = new Set(groups.map(g => g.key))
             let changed = false
-            for (const directory of next.keys()) {
-                if (!knownGroups.has(directory)) {
-                    next.delete(directory)
+            for (const key of next.keys()) {
+                if (!knownKeys.has(key)) {
+                    next.delete(key)
                     changed = true
                 }
             }
@@ -385,27 +348,49 @@ export function SessionList(props: {
             <div className="flex flex-col">
                 {groups.map((group) => {
                     const isCollapsed = isGroupCollapsed(group)
+                    const mid = group.machineId
                     return (
-                        <div key={group.directory}>
-                            <button
-                                type="button"
-                                onClick={() => toggleGroup(group.directory, isCollapsed)}
-                                className="sticky top-0 z-10 flex w-full items-center gap-2 px-3 py-2 text-left bg-[var(--app-bg)] border-b border-[var(--app-divider)] transition-colors hover:bg-[var(--app-secondary-bg)]"
-                            >
-                                <ChevronIcon
-                                    className="h-4 w-4 text-[var(--app-hint)]"
-                                    collapsed={isCollapsed}
-                                />
-                                <div className="flex items-center gap-2 min-w-0 flex-1">
-                                    <span className="font-medium text-base break-words" title={group.directory}>
-                                        {group.displayName}
-                                    </span>
-                                    <span className="shrink-0 text-xs text-[var(--app-hint)]">
-                                        ({group.sessions.length})
-                                    </span>
-                                </div>
-                            </button>
-                            {!isCollapsed ? (
+                        <div key={group.key}>
+                            <div className="sticky top-0 z-10 flex items-center bg-[var(--app-bg)] border-b border-[var(--app-divider)]">
+                                <button
+                                    type="button"
+                                    onClick={() => toggleGroup(group.key, isCollapsed)}
+                                    className="flex flex-1 items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--app-secondary-bg)]"
+                                >
+                                    <ChevronIcon
+                                        className="h-4 w-4 text-[var(--app-hint)]"
+                                        collapsed={isCollapsed}
+                                    />
+                                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                                        <span className="font-medium text-base break-words" title={group.directory}>
+                                            {group.displayName}
+                                        </span>
+                                        {group.sessions.length > 0 ? (
+                                            <span className="shrink-0 text-xs text-[var(--app-hint)]">
+                                                ({group.sessions.length})
+                                            </span>
+                                        ) : null}
+                                    </div>
+                                </button>
+                                {mid && api ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            knownSessionIdsRef.current = new Set(group.sessions.map(s => s.id))
+                                            api.openInTmux(mid, group.directory).then((res) => {
+                                                if (res.ok) setPendingAutoSelect(group.directory)
+                                            }).catch((err) => {
+                                                console.error('open-in-tmux failed:', err)
+                                            })
+                                        }}
+                                        className="shrink-0 px-2 py-2 text-[var(--app-hint)] hover:text-[var(--app-link)] transition-colors"
+                                        title="Open new Claude session in tmux"
+                                    >
+                                        <PlusIcon className="h-4 w-4" />
+                                    </button>
+                                ) : null}
+                            </div>
+                            {!isCollapsed && group.sessions.length > 0 ? (
                                 <div className="flex flex-col divide-y divide-[var(--app-divider)] border-b border-[var(--app-divider)]">
                                     {group.sessions.map((s) => (
                                         <SessionItem

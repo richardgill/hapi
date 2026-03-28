@@ -92,7 +92,17 @@ export type MessagesResponse = {
     }
 }
 
+export type TmuxSession = {
+    name: string
+    path: string
+    windows: number
+    attached: boolean
+    lastAttached: number
+    panePaths: string[]
+}
+
 export type MachinesResponse = { machines: Machine[] }
+export type TmuxSessionsResponse = { sessions: TmuxSession[] }
 export type MachinePathsExistsResponse = { exists: Record<string, boolean> }
 
 export type SpawnResponse =

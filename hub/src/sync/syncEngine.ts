@@ -445,6 +445,14 @@ export class SyncEngine {
         return false
     }
 
+    async listTmuxSessions(machineId: string): Promise<{ sessions: Array<{ name: string; path: string; windows: number; attached: boolean; lastAttached: number; panePaths: string[] }> }> {
+        return await this.rpcGateway.listTmuxSessions(machineId)
+    }
+
+    async openInTmux(machineId: string, directory: string): Promise<{ ok: boolean; error?: string }> {
+        return await this.rpcGateway.openInTmux(machineId, directory)
+    }
+
     async checkPathsExist(machineId: string, paths: string[]): Promise<Record<string, boolean>> {
         return await this.rpcGateway.checkPathsExist(machineId, paths)
     }
